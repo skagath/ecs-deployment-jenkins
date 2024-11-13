@@ -1,0 +1,87 @@
+pipeline {
+    agent any
+    environment {
+        CREDENTIALS_FILE_ID = 'my-secret'   
+        IMAGE_TAG = "${env.BUILD_ID}
+    }
+
+    stages {
+        stage('Clone Repository') {
+            steps {
+                // Clone the repository containing index.html and Dockerfile
+                git 'https://github.com/skagath/ecs-deployment-jenkins.git'
+            }
+        }
+    stages {
+        stage('Load Credentials') {
+            steps {
+                script {
+                    // Copy the file from Jenkins credentials into a local file
+                    def credsFile = credentials(CREDENTIALS_FILE_ID)
+                    writeFile file: 'aws_credentials.properties', text: credsFile
+
+                    // Load the credentials from the file into environment variables
+                    def props = readProperties file: 'aws_credentials.properties'
+                    env.AWS_REGION = props['AWS_REGION']
+                    env.ECR_REGISTRY = props['ECR_REGISTRY']
+                    env.ECR_REPO = props['ECR_REPO']
+                    env.CLUSTER_NAME = props['CLUSTER_NAME']
+                    env.SERVICE_NAME = props['SERVICE_NAME']
+                  
+                }
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                script {
+                    // Build Docker image with a unique tag
+                    docker.build("${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG}")
+                }
+            }
+        }
+
+        stage('Login to Amazon ECR') {
+            steps {
+                script {
+                    // Login to Amazon ECR
+                    def loginCommand = "aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY}"
+                    sh "${loginCommand}"
+                }
+            }
+        }
+
+        stage('Push Image to ECR') {
+            steps {
+                script {
+                    // Push the Docker image to Amazon ECR
+                    docker.image("${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG}").push()
+                }
+            }
+        }
+
+        stage('Deploy to ECS') {
+            steps {
+                script {
+                    // Update ECS service with the new image
+                    sh """
+                    aws ecs update-service --cluster ${CLUSTER_NAME} --service ${SERVICE_NAME} \
+                    --force-new-deployment --region ${AWS_REGION}
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            cleanWs() // Clean up the workspace
+        }
+        success {
+            echo 'Deployment successful!'
+        }
+        failure {
+            echo 'Deployment failed.'
+        }
+    }
+}
